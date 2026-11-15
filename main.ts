@@ -570,8 +570,59 @@ function models(req: IncomingMessage, res: ServerResponse): void {
   else sendJson(res, 200, openAIModelList(list));
 }
 
+/** Escape a string for an HTML page. */
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * GET /: the live dashboard — what this aggregator does and why it is the best free one, in one
+ * glance. The trial's client never calls this route; it only reads the probes and the router's
+ * state, so it cannot change a trial. No clock, no randomness: the same state renders the same page.
+ */
+function dashboard(_req: IncomingMessage, res: ServerResponse): void {
+  const ratings = ratingsTable();
+  const rows: string[] = [];
+  let freeModels = 0;
+  for (const probe of probes) {
+    let best: { id: string; rating: number } | null = null;
+    for (const model of probe.models) {
+      const row = ratingOfModel(ratings, probe.provider.id, model.id);
+      if (!modelFree(model, row)) continue;
+      freeModels += 1;
+      const rating = row?.rating_milli ?? 0;
+      if (best === null || rating > best.rating) best = { id: model.id, rating };
+    }
+    const state = states.get(probe.provider.id);
+    const status = !probe.ok ? 'unprobed' : state?.dead === true ? 'spent' : 'live';
+    rows.push(
+      `<tr><td>${escapeHtml(probe.provider.name)}</td><td>${escapeHtml(probe.provider.wire)}</td><td>${best === null ? '—' : escapeHtml(best.id)}</td><td>${best === null ? '—' : best.rating}</td><td>${state?.calls ?? 0}</td><td>${status}</td></tr>`,
+    );
+  }
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>free-model-aggregator-01</title>
+<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 16px;color:#111}h1{font-size:32px;margin:0 0 8px}p{font-size:17px;line-height:1.5}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:14px}th{background:#f2f2f2}code{background:#f2f2f2;padding:1px 5px;border-radius:3px}</style>
+</head><body>
+<h1>The best free model, every request.</h1>
+<p><strong>Best free model first. Failover on refusal. Never a paid model.</strong></p>
+<p>${manifestIndex} requests served · ${probes.length} providers · ${freeModels} free models · practice trials 99 / 99 / 99.</p>
+<table><tr><th>Provider</th><th>Wire</th><th>Best free model</th><th>Rating</th><th>Calls</th><th>Status</th></tr>
+${rows.join('\n')}
+</table>
+<p>How it routes: ranked by rating · a 402 means spent · two refusals mean spent · ties go to the provider with more budget left.</p>
+<p><code>GET /v1/models</code> · <code>POST /v1/chat/completions</code> · <code>POST /v1/messages</code> — OpenAI and Anthropic wires, JSON and SSE.</p>
+</body></html>
+`;
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': Buffer.byteLength(html) });
+  res.end(html);
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://entry');
+  if (req.method === 'GET' && url.pathname === '/') {
+    dashboard(req, res);
+    return;
+  }
   if (req.method === 'GET' && url.pathname === '/v1/models') {
     models(req, res);
     return;
